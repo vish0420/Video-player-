@@ -1,0 +1,38 @@
+name: video_player_app
+description: A personal video player for Android with gesture controls, resume playback, and season-based theming.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Video playback engine (broad codec/container support: mkv, eac3, etc.)
+  media_kit: ^1.1.10
+  media_kit_video: ^1.2.4
+  media_kit_libs_android_video: ^1.3.6
+
+  # Finds video files across internal storage AND SD card via the system MediaStore
+  photo_manager: ^3.2.0
+
+  # Persist theme choice, last-played video, and per-video resume position
+  shared_preferences: ^2.2.2
+
+  # Share a video file to other apps
+  share_plus: ^7.2.2
+
+  # Lightweight state management for theme/settings
+  provider: ^6.1.2
+
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
