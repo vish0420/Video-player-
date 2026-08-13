@@ -51,19 +51,39 @@ jobs:
           cp -r _scaffold/android ./android
           rm -rf _scaffold
 
-      - name: Configure Android SDK
+      - name: Configure Android SDK for app and plugins
         shell: bash
         run: |
           set -euo pipefail
-          GRADLE=android/app/build.gradle.kts
-          if [ -f "$GRADLE" ]; then
-            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' "$GRADLE"
-            sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' "$GRADLE"
+          APP_GRADLE=android/app/build.gradle.kts
+          if [ -f "$APP_GRADLE" ]; then
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' "$APP_GRADLE"
+            sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' "$APP_GRADLE"
           else
-            GRADLE_GROOVY=android/app/build.gradle
-            sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' "$GRADLE_GROOVY"
-            sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 36/' "$GRADLE_GROOVY"
+            APP_GRADLE=android/app/build.gradle
+            sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' "$APP_GRADLE"
+            sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 36/' "$APP_GRADLE"
           fi
+
+          # Flutter plugins can declare their own compileSdk. Force every
+          # Android library module to compile against 36 so AAR metadata from
+          # modern AndroidX dependencies cannot fail the release build.
+          ROOT_GRADLE=android/build.gradle.kts
+          cat >> "$ROOT_GRADLE" <<'KOTLIN'
+
+          import com.android.build.api.dsl.LibraryExtension
+
+          subprojects {
+              plugins.withId("com.android.library") {
+                  extensions.configure<LibraryExtension> {
+                      compileSdk = 36
+                  }
+              }
+          }
+          KOTLIN
+
+          # Ensure the Android SDK platform required by the build is present.
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
 
       - name: Add required Android permissions
         shell: bash
@@ -82,8 +102,9 @@ jobs:
               <uses-permission android:name="android.permission.WAKE_LOCK"/>
           '''
           marker = "<application"
-          insert_at = content.index(marker)
-          content = content[:insert_at] + permissions + "\n    " + content[insert_at:]
+          if "READ_MEDIA_VIDEO" not in content:
+              insert_at = content.index(marker)
+              content = content[:insert_at] + permissions + "\n    " + content[insert_at:]
           with open(path, "w", encoding="utf-8") as f:
               f.write(content)
           PYEOF
@@ -96,6 +117,13 @@ jobs:
 
       - name: Build release APK
         run: flutter build apk --release
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
 
       - name: Rename APK
         run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/video-player.apk
