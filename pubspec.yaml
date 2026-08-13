@@ -18,6 +18,9 @@ dependencies:
   # Finds video files across internal storage AND SD card via Android MediaStore.
   photo_manager: 3.6.2
 
+  # Share the currently playing video to another app.
+  share_plus: ^13.3.0
+
   # Persist theme choice, last-played video, and per-video resume position.
   shared_preferences: ^2.2.2
 
