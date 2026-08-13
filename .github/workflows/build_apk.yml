@@ -51,6 +51,20 @@ jobs:
           cp -r _scaffold/android ./android
           rm -rf _scaffold
 
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE=android/app/build.gradle.kts
+          if [ -f "$GRADLE" ]; then
+            sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' "$GRADLE"
+            sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 36/' "$GRADLE"
+          else
+            GRADLE_GROOVY=android/app/build.gradle
+            sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' "$GRADLE_GROOVY"
+            sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 36/' "$GRADLE_GROOVY"
+          fi
+
       - name: Add required Android permissions
         shell: bash
         run: |
@@ -77,8 +91,6 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      # Current Flutter reports deprecated API usage as informational diagnostics.
-      # Keep analyzer output visible without blocking the APK build on infos.
       - name: Analyze Flutter application
         run: flutter analyze lib --no-fatal-infos
 
