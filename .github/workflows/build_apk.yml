@@ -5,9 +5,13 @@ on:
     branches: [ "main" ]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,47 +20,80 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Show Flutter version
         run: flutter --version
 
+      # This repository keeps the Dart source files at the repository root,
+      # while Flutter expects the application entry point under lib/.
+      - name: Arrange Flutter source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lib/models lib/services lib/theme lib/screens lib/widgets
+
+          cp main.dart lib/main.dart
+          cp video_item.dart lib/models/video_item.dart
+          cp playback_service.dart lib/services/playback_service.dart
+          cp theme_service.dart lib/theme/theme_service.dart
+          cp season_gradients.dart lib/theme/season_gradients.dart
+          cp app_theme.dart lib/theme/app_theme.dart
+          cp home_screen.dart lib/screens/home_screen.dart
+          cp player_screen.dart lib/screens/player_screen.dart
+          cp video_grid_tile.dart lib/widgets/video_grid_tile.dart
+          cp continue_watching_fab.dart lib/widgets/continue_watching_fab.dart
+          cp gesture_control_layer.dart lib/widgets/gesture_control_layer.dart
+          cp player_controls_overlay.dart lib/widgets/player_controls_overlay.dart
+
       - name: Scaffold native Android project
         run: |
-          flutter create --platforms=android --org com.example.videoplayer --project-name video_player_app _scaffold
+          set -euo pipefail
+          flutter create --platforms=android --org com.vish0420 --project-name video_player_app _scaffold
           cp -r _scaffold/android ./android
           rm -rf _scaffold
 
-      - name: Add required permissions to AndroidManifest.xml
+      - name: Add required Android permissions
+        shell: bash
         run: |
+          set -euo pipefail
           MANIFEST=android/app/src/main/AndroidManifest.xml
           python3 - "$MANIFEST" << 'PYEOF'
           import sys
           path = sys.argv[1]
-          with open(path, "r") as f:
+          with open(path, "r", encoding="utf-8") as f:
               content = f.read()
 
-          permissions = (
-              '    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>\n'
-              '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>\n'
-              '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n'
-              '    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n'
-          )
+          permissions = '''
+              <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+          '''
 
-          insert_at = content.index(">", content.index("<manifest")) + 1
-          content = content[:insert_at] + "\n" + permissions + content[insert_at:]
+          marker = "<application"
+          insert_at = content.index(marker)
+          content = content[:insert_at] + permissions + "\n    " + content[insert_at:]
 
-          with open(path, "w") as f:
+          with open(path, "w", encoding="utf-8") as f:
               f.write(content)
           PYEOF
 
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Analyze Dart code
+        run: flutter analyze
+
       - name: Build release APK
         run: flutter build apk --release
+
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/video-player.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: video-player-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/video-player.apk
+          if-no-files-found: error
