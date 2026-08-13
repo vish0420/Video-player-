@@ -71,18 +71,15 @@ jobs:
           ROOT_GRADLE=android/build.gradle.kts
           cat >> "$ROOT_GRADLE" <<'KOTLIN'
 
-          import com.android.build.api.dsl.LibraryExtension
-
           subprojects {
               plugins.withId("com.android.library") {
-                  extensions.configure<LibraryExtension> {
+                  extensions.configure<com.android.build.api.dsl.LibraryExtension> {
                       compileSdk = 36
                   }
               }
           }
           KOTLIN
 
-          # Ensure the Android SDK platform required by the build is present.
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
 
       - name: Add required Android permissions
