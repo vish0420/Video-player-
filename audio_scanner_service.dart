@@ -1,6 +1,6 @@
 import 'package:photo_manager/photo_manager.dart';
 
-import 'audio_item.dart';
+import 'models/audio_item.dart';
 
 class AudioScannerService {
   Future<bool> requestPermission() async {
