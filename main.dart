@@ -1,26 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:photo_manager/photo_manager.dart';
-import 'dart:async';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const AudioOnlyApp());
-  unawaited(_initBackgroundAudio());
-}
-
-Future<void> _initBackgroundAudio() async {
-  try {
-    await JustAudioBackground.init(
-      androidNotificationChannelId: 'com.vish0420.audio.channel',
-      androidNotificationChannelName: 'Audio playback',
-      androidNotificationOngoing: true,
-    );
-  } catch (_) {
-    // Keep the UI usable even if background-audio initialization is not
-    // available on a particular device. Foreground playback can still work.
-  }
 }
 
 enum Season { spring, summer, autumn, winter }
@@ -60,6 +47,7 @@ class AudioController extends ChangeNotifier {
   Season season = Season.spring;
   Timer? sleepTimer;
   int currentIndex = -1;
+  bool backgroundReady = false;
 
   AudioController() {
     player.currentIndexStream.listen((index) {
@@ -72,6 +60,20 @@ class AudioController extends ChangeNotifier {
 
   SeasonPalette get palette => paletteFor(season);
   AudioTrack? get current => currentIndex >= 0 && currentIndex < tracks.length ? tracks[currentIndex] : null;
+
+  Future<void> initBackgroundAudio() async {
+    if (backgroundReady) return;
+    try {
+      await JustAudioBackground.init(
+        androidNotificationChannelId: 'com.vish0420.audio.channel',
+        androidNotificationChannelName: 'Audio playback',
+        androidNotificationOngoing: true,
+      );
+      backgroundReady = true;
+    } catch (_) {
+      // Foreground audio remains usable even if background service setup fails.
+    }
+  }
 
   Future<bool> requestPermission() async {
     final state = await PhotoManager.requestPermissionExtend();
@@ -114,7 +116,15 @@ class AudioController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> pauseOrPlay() async => player.playing ? player.pause() : player.play();
+  Future<void> pauseOrPlay() async {
+    if (player.playing) {
+      await player.pause();
+    } else {
+      await player.play();
+    }
+    notifyListeners();
+  }
+
   Future<void> next() async => player.seekToNext();
   Future<void> previous() async => player.seekToPrevious();
 
@@ -127,7 +137,10 @@ class AudioController extends ChangeNotifier {
 
   void setSleep(Duration? duration) {
     sleepTimer?.cancel();
-    if (duration == null) return;
+    if (duration == null) {
+      notifyListeners();
+      return;
+    }
     sleepTimer = Timer(duration, () async {
       await player.pause();
       sleepTimer = null;
@@ -154,49 +167,77 @@ class _AudioOnlyAppState extends State<AudioOnlyApp> {
   late final AudioController controller;
   bool loading = true;
   bool denied = false;
+  String status = 'Opening Audio Player…';
 
   @override
   void initState() {
     super.initState();
     controller = AudioController();
-    _startup();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startup());
   }
 
   Future<void> _startup() async {
     if (!mounted) return;
-    setState(() => loading = true);
+    setState(() {
+      loading = true;
+      status = 'Preparing your music library…';
+    });
     try {
+      // Do not block the first rendered frame on native audio initialization.
+      unawaited(controller.initBackgroundAudio());
+
       final granted = await controller.requestPermission();
       if (!granted) {
         if (!mounted) return;
-        setState(() { denied = true; loading = false; });
+        setState(() {
+          denied = true;
+          loading = false;
+          status = '';
+        });
         return;
       }
+
       await controller.scan();
       if (!mounted) return;
-      setState(() { denied = false; loading = false; });
+      setState(() {
+        denied = false;
+        loading = false;
+        status = '';
+      });
     } catch (_) {
       if (!mounted) return;
-      setState(() { denied = false; loading = false; });
+      setState(() {
+        denied = false;
+        loading = false;
+        status = '';
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final p = controller.palette;
     return AnimatedBuilder(
       animation: controller,
-      builder: (context, _) => MaterialApp(
-        debugShowCheckedModeBanner: false,
-        title: 'Audio Player',
-        theme: ThemeData(
-          useMaterial3: true,
-          brightness: Brightness.dark,
-          scaffoldBackgroundColor: p.gradient.last,
-          colorScheme: ColorScheme.fromSeed(seedColor: p.accent, brightness: Brightness.dark),
-        ),
-        home: AudioHomePage(controller: controller, loading: loading, denied: denied, onRefresh: _startup),
-      ),
+      builder: (context, _) {
+        final p = controller.palette;
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: 'Audio Player',
+          theme: ThemeData(
+            useMaterial3: true,
+            brightness: Brightness.dark,
+            scaffoldBackgroundColor: p.gradient.last,
+            colorScheme: ColorScheme.fromSeed(seedColor: p.accent, brightness: Brightness.dark),
+          ),
+          home: AudioHomePage(
+            controller: controller,
+            loading: loading,
+            denied: denied,
+            status: status,
+            onRefresh: _startup,
+          ),
+        );
+      },
     );
   }
 }
@@ -205,15 +246,30 @@ class AudioHomePage extends StatelessWidget {
   final AudioController controller;
   final bool loading;
   final bool denied;
+  final String status;
   final VoidCallback onRefresh;
-  const AudioHomePage({super.key, required this.controller, required this.loading, required this.denied, required this.onRefresh});
+
+  const AudioHomePage({
+    super.key,
+    required this.controller,
+    required this.loading,
+    required this.denied,
+    required this.status,
+    required this.onRefresh,
+  });
 
   @override
   Widget build(BuildContext context) {
     final p = controller.palette;
     return Scaffold(
       body: Container(
-        decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: p.gradient)),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: p.gradient,
+          ),
+        ),
         child: SafeArea(
           child: Column(
             children: [
@@ -221,11 +277,16 @@ class AudioHomePage extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(16, 14, 10, 8),
                 child: Row(
                   children: [
-                    const Expanded(child: Text('Audio Player', style: TextStyle(fontSize: 27, fontWeight: FontWeight.w700))),
+                    const Expanded(
+                      child: Text('Audio Player', style: TextStyle(fontSize: 27, fontWeight: FontWeight.w700)),
+                    ),
                     IconButton(onPressed: onRefresh, icon: const Icon(Icons.refresh_rounded)),
                     PopupMenuButton<Season>(
                       icon: const Icon(Icons.auto_awesome_rounded),
-                      onSelected: (s) => controller.season = s,
+                      onSelected: (s) {
+                        controller.season = s;
+                        controller.notifyListeners();
+                      },
                       itemBuilder: (_) => const [
                         PopupMenuItem(value: Season.spring, child: Text('Spring')),
                         PopupMenuItem(value: Season.summer, child: Text('Summer')),
@@ -238,7 +299,16 @@ class AudioHomePage extends StatelessWidget {
               ),
               Expanded(
                 child: loading
-                    ? const Center(child: CircularProgressIndicator())
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const CircularProgressIndicator(),
+                            const SizedBox(height: 16),
+                            Text(status),
+                          ],
+                        ),
+                      )
                     : denied
                         ? _PermissionView(onRefresh: onRefresh)
                         : controller.tracks.isEmpty
@@ -257,6 +327,7 @@ class AudioHomePage extends StatelessWidget {
 class _PermissionView extends StatelessWidget {
   final VoidCallback onRefresh;
   const _PermissionView({required this.onRefresh});
+
   @override
   Widget build(BuildContext context) => Center(
         child: Padding(
@@ -278,6 +349,7 @@ class _PermissionView extends StatelessWidget {
 class _TrackList extends StatelessWidget {
   final AudioController controller;
   const _TrackList({required this.controller});
+
   @override
   Widget build(BuildContext context) {
     final p = controller.palette;
@@ -291,10 +363,19 @@ class _TrackList extends StatelessWidget {
         return ListTile(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
           tileColor: active ? p.accent.withValues(alpha: 0.18) : Colors.black.withValues(alpha: 0.12),
-          leading: CircleAvatar(backgroundColor: p.accent, foregroundColor: Colors.black, child: const Icon(Icons.music_note_rounded)),
+          leading: CircleAvatar(
+            backgroundColor: p.accent,
+            foregroundColor: Colors.black,
+            child: const Icon(Icons.music_note_rounded),
+          ),
           title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
           subtitle: Text('${track.duration.inMinutes}:${(track.duration.inSeconds % 60).toString().padLeft(2, '0')}'),
-          trailing: active ? IconButton(onPressed: controller.pauseOrPlay, icon: Icon(controller.player.playing ? Icons.pause_rounded : Icons.play_arrow_rounded)) : const Icon(Icons.play_arrow_rounded),
+          trailing: active
+              ? IconButton(
+                  onPressed: controller.pauseOrPlay,
+                  icon: Icon(controller.player.playing ? Icons.pause_rounded : Icons.play_arrow_rounded),
+                )
+              : const Icon(Icons.play_arrow_rounded),
           onTap: () => controller.playAt(index),
         );
       },
@@ -305,6 +386,7 @@ class _TrackList extends StatelessWidget {
 class _MiniPlayer extends StatelessWidget {
   final AudioController controller;
   const _MiniPlayer({required this.controller});
+
   @override
   Widget build(BuildContext context) {
     final current = controller.current;
@@ -312,14 +394,20 @@ class _MiniPlayer extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.36), borderRadius: BorderRadius.circular(20)),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.36),
+        borderRadius: BorderRadius.circular(20),
+      ),
       child: Row(
         children: [
           const Icon(Icons.album_rounded),
           const SizedBox(width: 10),
           Expanded(child: Text(current.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
           IconButton(onPressed: controller.previous, icon: const Icon(Icons.skip_previous_rounded)),
-          IconButton(onPressed: controller.pauseOrPlay, icon: Icon(controller.player.playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded)),
+          IconButton(
+            onPressed: controller.pauseOrPlay,
+            icon: Icon(controller.player.playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded),
+          ),
           IconButton(onPressed: controller.next, icon: const Icon(Icons.skip_next_rounded)),
         ],
       ),
