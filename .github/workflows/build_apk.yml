@@ -80,7 +80,7 @@ jobs:
           }
           KOTLIN
 
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
 
       - name: Add required Android permissions
         shell: bash
