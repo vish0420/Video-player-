@@ -7,28 +7,14 @@ import 'package:photo_manager/photo_manager.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const AudioOnlyApp());
-}
-
-enum Season { spring, summer, autumn, winter }
-
-class SeasonPalette {
-  final List<Color> gradient;
-  final Color accent;
-  const SeasonPalette(this.gradient, this.accent);
-}
-
-SeasonPalette paletteFor(Season season) {
-  switch (season) {
-    case Season.spring:
-      return const SeasonPalette([Color(0xFF31572C), Color(0xFF90A955)], Color(0xFFDDEBA0));
-    case Season.summer:
-      return const SeasonPalette([Color(0xFF0077B6), Color(0xFF48CAE4)], Color(0xFFCAF0F8));
-    case Season.autumn:
-      return const SeasonPalette([Color(0xFF7F2F1B), Color(0xFFD97706)], Color(0xFFFDBA74));
-    case Season.winter:
-      return const SeasonPalette([Color(0xFF16324F), Color(0xFF3A506B)], Color(0xFFA6DCEF));
-  }
+  try {
+    await JustAudioBackground.init(
+      androidNotificationChannelId: 'com.vish0420.audio.channel',
+      androidNotificationChannelName: 'Audio playback',
+      androidNotificationOngoing: true,
+    );
+  } catch (_) {}
+  runApp(const AudioPlayerApp());
 }
 
 class AudioTrack {
@@ -44,35 +30,17 @@ class AudioTrack {
 class AudioController extends ChangeNotifier {
   final AudioPlayer player = AudioPlayer();
   final List<AudioTrack> tracks = [];
-  Season season = Season.spring;
-  Timer? sleepTimer;
   int currentIndex = -1;
-  bool backgroundReady = false;
+  Timer? _sleepTimer;
+  DateTime? _sleepEndsAt;
 
-  AudioController() {
-    player.currentIndexStream.listen((index) {
-      if (index != null) {
-        currentIndex = index;
-        notifyListeners();
-      }
-    });
-  }
-
-  SeasonPalette get palette => paletteFor(season);
   AudioTrack? get current => currentIndex >= 0 && currentIndex < tracks.length ? tracks[currentIndex] : null;
 
-  Future<void> initBackgroundAudio() async {
-    if (backgroundReady) return;
-    try {
-      await JustAudioBackground.init(
-        androidNotificationChannelId: 'com.vish0420.audio.channel',
-        androidNotificationChannelName: 'Audio playback',
-        androidNotificationOngoing: true,
-      );
-      backgroundReady = true;
-    } catch (_) {
-      // Foreground audio remains usable even if background service setup fails.
-    }
+  Duration? get sleepRemaining {
+    final end = _sleepEndsAt;
+    if (end == null) return null;
+    final remaining = end.difference(DateTime.now());
+    return remaining.isNegative ? Duration.zero : remaining;
   }
 
   Future<bool> requestPermission() async {
@@ -82,245 +50,236 @@ class AudioController extends ChangeNotifier {
 
   Future<void> scan() async {
     tracks.clear();
+    currentIndex = -1;
+    notifyListeners();
+
+    // Only RequestType.audio is queried, so images and videos never enter the list.
     final paths = await PhotoManager.getAssetPathList(type: RequestType.audio, onlyAll: true);
-    if (paths.isEmpty) {
-      notifyListeners();
-      return;
-    }
+    if (paths.isEmpty) return;
     final album = paths.first;
     final count = await album.assetCountAsync;
-    if (count == 0) {
-      notifyListeners();
-      return;
-    }
+    if (count == 0) return;
+
     final assets = await album.getAssetListPaged(page: 0, size: count);
     assets.sort((a, b) => (a.title ?? '').toLowerCase().compareTo((b.title ?? '').toLowerCase()));
     for (final asset in assets) {
-      final title = asset.title?.trim().isNotEmpty == true ? asset.title!.trim() : 'Untitled audio';
-      tracks.add(AudioTrack(asset: asset, title: title, duration: Duration(seconds: asset.duration)));
+      final title = asset.title?.trim();
+      tracks.add(AudioTrack(
+        asset: asset,
+        title: title?.isNotEmpty == true ? title! : 'Untitled audio',
+        duration: Duration(seconds: asset.duration),
+      ));
     }
     notifyListeners();
   }
 
   Future<void> playAt(int index) async {
     if (index < 0 || index >= tracks.length) return;
-    final sources = <AudioSource>[];
-    for (final t in tracks) {
-      final path = await t.path();
-      if (path == null) continue;
-      sources.add(AudioSource.file(path, tag: MediaItem(id: path, title: t.title)));
+    final track = tracks[index];
+    final path = await track.path();
+    if (path == null) return;
+
+    try {
+      currentIndex = index;
+      notifyListeners();
+      // Resolve/load only the selected file to reduce memory pressure.
+      await player.setAudioSource(AudioSource.file(
+        path,
+        tag: MediaItem(
+          id: path,
+          title: track.title,
+          album: 'Audio Player',
+          duration: track.duration,
+        ),
+      ));
+      await player.play();
+      notifyListeners();
+    } catch (_) {
+      notifyListeners();
     }
-    if (sources.isEmpty) return;
-    await player.setAudioSources(sources, initialIndex: index, initialPosition: Duration.zero);
-    await player.play();
-    notifyListeners();
   }
 
-  Future<void> pauseOrPlay() async {
+  Future<void> togglePlayPause() async {
     if (player.playing) {
       await player.pause();
-    } else {
+    } else if (current != null) {
       await player.play();
     }
     notifyListeners();
   }
 
-  Future<void> next() async => player.seekToNext();
-  Future<void> previous() async => player.seekToPrevious();
-
-  Future<void> seekRelative(int seconds) async {
-    final position = player.position + Duration(seconds: seconds);
-    final duration = player.duration ?? Duration.zero;
-    final clamped = position < Duration.zero ? Duration.zero : (position > duration ? duration : position);
-    await player.seek(clamped);
+  Future<void> next() async {
+    if (tracks.isEmpty) return;
+    await playAt(currentIndex < tracks.length - 1 ? currentIndex + 1 : 0);
   }
 
-  void setSleep(Duration? duration) {
-    sleepTimer?.cancel();
-    if (duration == null) {
-      notifyListeners();
-      return;
+  Future<void> previous() async {
+    if (tracks.isEmpty) return;
+    await playAt(currentIndex > 0 ? currentIndex - 1 : tracks.length - 1);
+  }
+
+  void setSleepTimer(Duration? duration) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    _sleepEndsAt = null;
+    if (duration != null) {
+      _sleepEndsAt = DateTime.now().add(duration);
+      _sleepTimer = Timer(duration, () async {
+        await player.pause();
+        _sleepTimer = null;
+        _sleepEndsAt = null;
+        notifyListeners();
+      });
     }
-    sleepTimer = Timer(duration, () async {
-      await player.pause();
-      sleepTimer = null;
-      notifyListeners();
-    });
     notifyListeners();
   }
 
   @override
   void dispose() {
-    sleepTimer?.cancel();
+    _sleepTimer?.cancel();
     player.dispose();
     super.dispose();
   }
 }
 
-class AudioOnlyApp extends StatefulWidget {
-  const AudioOnlyApp({super.key});
+class AudioPlayerApp extends StatefulWidget {
+  const AudioPlayerApp({super.key});
   @override
-  State<AudioOnlyApp> createState() => _AudioOnlyAppState();
+  State<AudioPlayerApp> createState() => _AudioPlayerAppState();
 }
 
-class _AudioOnlyAppState extends State<AudioOnlyApp> {
+class _AudioPlayerAppState extends State<AudioPlayerApp> {
   late final AudioController controller;
   bool loading = true;
-  bool denied = false;
-  String status = 'Opening Audio Player…';
+  bool permissionDenied = false;
 
   @override
   void initState() {
     super.initState();
     controller = AudioController();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _startup());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadLibrary());
   }
 
-  Future<void> _startup() async {
+  Future<void> _loadLibrary() async {
     if (!mounted) return;
     setState(() {
       loading = true;
-      status = 'Preparing your music library…';
+      permissionDenied = false;
     });
     try {
-      // Do not block the first rendered frame on native audio initialization.
-      unawaited(controller.initBackgroundAudio());
-
       final granted = await controller.requestPermission();
       if (!granted) {
         if (!mounted) return;
         setState(() {
-          denied = true;
           loading = false;
-          status = '';
+          permissionDenied = true;
         });
         return;
       }
-
       await controller.scan();
-      if (!mounted) return;
-      setState(() {
-        denied = false;
-        loading = false;
-        status = '';
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        denied = false;
-        loading = false;
-        status = '';
-      });
-    }
+    } catch (_) {}
+    if (mounted) setState(() => loading = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        final p = controller.palette;
-        return MaterialApp(
-          debugShowCheckedModeBanner: false,
-          title: 'Audio Player',
-          theme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.dark,
-            scaffoldBackgroundColor: p.gradient.last,
-            colorScheme: ColorScheme.fromSeed(seedColor: p.accent, brightness: Brightness.dark),
-          ),
-          home: AudioHomePage(
-            controller: controller,
-            loading: loading,
-            denied: denied,
-            status: status,
-            onRefresh: _startup,
-          ),
-        );
-      },
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Audio Player',
+      theme: ThemeData(useMaterial3: true, brightness: Brightness.dark),
+      home: AudioHomePage(
+        controller: controller,
+        loading: loading,
+        permissionDenied: permissionDenied,
+        onRefresh: _loadLibrary,
+      ),
     );
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
   }
 }
 
 class AudioHomePage extends StatelessWidget {
   final AudioController controller;
   final bool loading;
-  final bool denied;
-  final String status;
+  final bool permissionDenied;
   final VoidCallback onRefresh;
 
   const AudioHomePage({
     super.key,
     required this.controller,
     required this.loading,
-    required this.denied,
-    required this.status,
+    required this.permissionDenied,
     required this.onRefresh,
   });
 
   @override
   Widget build(BuildContext context) {
-    final p = controller.palette;
-    return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: p.gradient,
-          ),
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) => Scaffold(
+        appBar: AppBar(
+          title: const Text('Audio Player'),
+          actions: [
+            IconButton(
+              tooltip: 'Sleep timer',
+              icon: const Icon(Icons.bedtime_outlined),
+              onPressed: () => _showSleepTimer(context),
+            ),
+            IconButton(
+              tooltip: 'Refresh',
+              icon: const Icon(Icons.refresh_rounded),
+              onPressed: onRefresh,
+            ),
+          ],
         ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 10, 8),
-                child: Row(
-                  children: [
-                    const Expanded(
-                      child: Text('Audio Player', style: TextStyle(fontSize: 27, fontWeight: FontWeight.w700)),
-                    ),
-                    IconButton(onPressed: onRefresh, icon: const Icon(Icons.refresh_rounded)),
-                    PopupMenuButton<Season>(
-                      icon: const Icon(Icons.auto_awesome_rounded),
-                      onSelected: (s) {
-                        controller.season = s;
-                        controller.notifyListeners();
-                      },
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: Season.spring, child: Text('Spring')),
-                        PopupMenuItem(value: Season.summer, child: Text('Summer')),
-                        PopupMenuItem(value: Season.autumn, child: Text('Autumn')),
-                        PopupMenuItem(value: Season.winter, child: Text('Winter')),
-                      ],
-                    ),
-                  ],
-                ),
+        body: loading
+            ? const Center(child: CircularProgressIndicator())
+            : permissionDenied
+                ? _PermissionView(onRefresh: onRefresh)
+                : controller.tracks.isEmpty
+                    ? const Center(child: Text('No audio files found.'))
+                    : Column(
+                        children: [
+                          Expanded(child: _TrackList(controller: controller)),
+                          if (controller.current != null) _MiniPlayer(controller: controller),
+                        ],
+                      ),
+      ),
+    );
+  }
+
+  Future<void> _showSleepTimer(BuildContext context) async {
+    final choice = await showModalBottomSheet<Duration?>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ListTile(
+              leading: Icon(Icons.bedtime_outlined),
+              title: Text('Sleep timer'),
+              subtitle: Text('Pause playback automatically'),
+            ),
+            for (final minutes in [15, 30, 45, 60, 90, 120])
+              ListTile(
+                title: Text('$minutes minutes'),
+                onTap: () => Navigator.pop(sheetContext, Duration(minutes: minutes)),
               ),
-              Expanded(
-                child: loading
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const CircularProgressIndicator(),
-                            const SizedBox(height: 16),
-                            Text(status),
-                          ],
-                        ),
-                      )
-                    : denied
-                        ? _PermissionView(onRefresh: onRefresh)
-                        : controller.tracks.isEmpty
-                            ? const Center(child: Text('No audio files found.'))
-                            : _TrackList(controller: controller),
-              ),
-              if (!loading && !denied && controller.tracks.isNotEmpty) _MiniPlayer(controller: controller),
-            ],
-          ),
+            ListTile(
+              leading: const Icon(Icons.timer_off_outlined),
+              title: const Text('Turn off'),
+              onTap: () => Navigator.pop(sheetContext, Duration.zero),
+            ),
+          ],
         ),
       ),
     );
+    if (choice != null) controller.setSleepTimer(choice == Duration.zero ? null : choice);
   }
 }
 
@@ -352,30 +311,20 @@ class _TrackList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final p = controller.palette;
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
       itemCount: controller.tracks.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 6),
+      separatorBuilder: (_, __) => const SizedBox(height: 4),
       itemBuilder: (context, index) {
         final track = controller.tracks[index];
         final active = controller.currentIndex == index;
         return ListTile(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-          tileColor: active ? p.accent.withValues(alpha: 0.18) : Colors.black.withValues(alpha: 0.12),
-          leading: CircleAvatar(
-            backgroundColor: p.accent,
-            foregroundColor: Colors.black,
-            child: const Icon(Icons.music_note_rounded),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          selected: active,
+          leading: const CircleAvatar(child: Icon(Icons.music_note_rounded)),
           title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: Text('${track.duration.inMinutes}:${(track.duration.inSeconds % 60).toString().padLeft(2, '0')}'),
-          trailing: active
-              ? IconButton(
-                  onPressed: controller.pauseOrPlay,
-                  icon: Icon(controller.player.playing ? Icons.pause_rounded : Icons.play_arrow_rounded),
-                )
-              : const Icon(Icons.play_arrow_rounded),
+          subtitle: Text(_formatDuration(track.duration)),
+          trailing: Icon(active && controller.player.playing ? Icons.equalizer_rounded : Icons.play_arrow_rounded),
           onTap: () => controller.playAt(index),
         );
       },
@@ -391,26 +340,48 @@ class _MiniPlayer extends StatelessWidget {
   Widget build(BuildContext context) {
     final current = controller.current;
     if (current == null) return const SizedBox.shrink();
-    return Container(
-      margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.36),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.album_rounded),
-          const SizedBox(width: 10),
-          Expanded(child: Text(current.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
-          IconButton(onPressed: controller.previous, icon: const Icon(Icons.skip_previous_rounded)),
-          IconButton(
-            onPressed: controller.pauseOrPlay,
-            icon: Icon(controller.player.playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded),
+    final remaining = controller.sleepRemaining;
+    return Material(
+      elevation: 8,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.music_note_rounded),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(current.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                  IconButton(onPressed: controller.previous, icon: const Icon(Icons.skip_previous_rounded)),
+                  StreamBuilder<PlayerState>(
+                    stream: controller.player.playerStateStream,
+                    builder: (_, snapshot) {
+                      final playing = snapshot.data?.playing ?? false;
+                      return IconButton(
+                        iconSize: 34,
+                        onPressed: controller.togglePlayPause,
+                        icon: Icon(playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded),
+                      );
+                    },
+                  ),
+                  IconButton(onPressed: controller.next, icon: const Icon(Icons.skip_next_rounded)),
+                ],
+              ),
+              if (remaining != null) Text('Sleep timer: ${_formatDuration(remaining)}'),
+            ],
           ),
-          IconButton(onPressed: controller.next, icon: const Icon(Icons.skip_next_rounded)),
-        ],
+        ),
       ),
     );
   }
+}
+
+String _formatDuration(Duration duration) {
+  final hours = duration.inHours;
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
 }
