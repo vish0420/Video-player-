@@ -11,20 +11,16 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
-
       - name: Show Flutter version
         run: flutter --version
-
       - name: Arrange Flutter source tree
         shell: bash
         run: |
@@ -47,14 +43,12 @@ jobs:
           cp continue_watching_fab.dart lib/widgets/continue_watching_fab.dart
           cp gesture_control_layer.dart lib/widgets/gesture_control_layer.dart
           cp player_controls_overlay.dart lib/widgets/player_controls_overlay.dart
-
       - name: Scaffold native Android project
         run: |
           set -euo pipefail
           flutter create --platforms=android --org com.vish0420 --project-name video_player_app _scaffold
           cp -r _scaffold/android ./android
           rm -rf _scaffold
-
       - name: Configure Android SDK for app and plugins
         shell: bash
         run: |
@@ -68,7 +62,6 @@ jobs:
             sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/' "$APP_GRADLE"
             sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 36/' "$APP_GRADLE"
           fi
-
           ROOT_GRADLE=android/build.gradle.kts
           cat >> "$ROOT_GRADLE" <<'KOTLIN'
 
@@ -80,56 +73,64 @@ jobs:
               }
           }
           KOTLIN
-
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" >/dev/null
-
-      - name: Add required Android permissions
+      - name: Add Android media and background playback configuration
         shell: bash
         run: |
           set -euo pipefail
           MANIFEST=android/app/src/main/AndroidManifest.xml
           python3 - "$MANIFEST" << 'PYEOF'
           import sys
-          path = sys.argv[1]
-          with open(path, "r", encoding="utf-8") as f:
-              content = f.read()
-          permissions = '''
+          path=sys.argv[1]
+          with open(path,encoding='utf-8') as f: content=f.read()
+          permissions='''
               <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
               <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
               <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
           '''
-          marker = "<application"
-          if "READ_MEDIA_VIDEO" not in content:
-              insert_at = content.index(marker)
-              content = content[:insert_at] + permissions + "\n    " + content[insert_at:]
-          elif "READ_MEDIA_AUDIO" not in content:
-              insert_at = content.index(marker)
-              content = content[:insert_at] + '    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    ' + content[insert_at:]
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(content)
+          marker='<application'
+          if 'READ_MEDIA_VIDEO' not in content:
+              i=content.index(marker); content=content[:i]+permissions+'\n    '+content[i:]
+          elif 'READ_MEDIA_AUDIO' not in content:
+              i=content.index(marker); content=content[:i]+'    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    '+content[i:]
+          service='''
+              <service
+                  android:name="com.ryanheise.audioservice.AudioService"
+                  android:foregroundServiceType="mediaPlayback"
+                  android:exported="true"
+                  android:stopWithTask="false">
+                  <intent-filter>
+                      <action android:name="android.media.browse.MediaBrowserService" />
+                  </intent-filter>
+              </service>
+              <receiver android:name="com.ryanheise.audioservice.MediaButtonReceiver" android:exported="true">
+                  <intent-filter>
+                      <action android:name="android.intent.action.MEDIA_BUTTON" />
+                  </intent-filter>
+              </receiver>
+          '''
+          if 'com.ryanheise.audioservice.AudioService' not in content:
+              i=content.index('</application>'); content=content[:i]+service+'\n    '+content[i:]
+          with open(path,'w',encoding='utf-8') as f:f.write(content)
           PYEOF
-
       - name: Get dependencies
         run: flutter pub get
-
       - name: Analyze Flutter application
         run: flutter analyze lib --no-fatal-infos
-
       - name: Build release APK
         run: flutter build apk --release
-
       - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
           test -s build/app/outputs/flutter-apk/app-release.apk
           ls -lh build/app/outputs/flutter-apk/app-release.apk
-
       - name: Rename APK
         run: cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/video-player.apk
-
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
