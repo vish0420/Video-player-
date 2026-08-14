@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/audio_item.dart';
+import '../services/audio_scanner_service.dart';
+import '../theme/season_gradients.dart';
+import '../theme/theme_service.dart';
 import 'audio_player_screen.dart';
-import 'models/audio_item.dart';
-import 'services/audio_scanner_service.dart';
-import 'theme/season_gradients.dart';
-import 'theme/theme_service.dart';
 
 class AudioHomeScreen extends StatefulWidget {
   const AudioHomeScreen({super.key});
