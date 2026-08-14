@@ -97,6 +97,8 @@ jobs:
               i=content.index(marker); content=content[:i]+permissions+'\n    '+content[i:]
           elif 'READ_MEDIA_AUDIO' not in content:
               i=content.index(marker); content=content[:i]+'    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>\n    '+content[i:]
+          # just_audio_background requires the audio service activity for the Android entry point.
+          content=content.replace('android:name=".MainActivity"', 'android:name="com.ryanheise.audioservice.AudioServiceActivity"')
           service='''
               <service
                   android:name="com.ryanheise.audioservice.AudioService"
