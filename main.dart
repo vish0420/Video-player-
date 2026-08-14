@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,8 +45,17 @@ class AudioController extends ChangeNotifier {
   }
 
   Future<bool> requestPermission() async {
-    final state = await PhotoManager.requestPermissionExtend();
-    return state.hasAccess;
+    // Check Android's actual audio permission first. If the user already
+    // granted it in Settings, do not show another permission prompt.
+    if (await Permission.audio.isGranted) return true;
+
+    final audioStatus = await Permission.audio.request();
+    if (audioStatus.isGranted) return true;
+
+    // Compatibility fallback for older Android versions.
+    if (await Permission.storage.isGranted) return true;
+    final storageStatus = await Permission.storage.request();
+    return storageStatus.isGranted;
   }
 
   Future<void> scan() async {
@@ -82,7 +92,6 @@ class AudioController extends ChangeNotifier {
     try {
       currentIndex = index;
       notifyListeners();
-      // Resolve/load only the selected file to reduce memory pressure.
       await player.setAudioSource(AudioSource.file(
         path,
         tag: MediaItem(
@@ -299,6 +308,13 @@ class _PermissionView extends StatelessWidget {
               const Text('Allow audio access to show your music library.', textAlign: TextAlign.center),
               const SizedBox(height: 16),
               FilledButton(onPressed: onRefresh, child: const Text('Grant audio access')),
+              const SizedBox(height: 10),
+              OutlinedButton(
+                onPressed: () async {
+                  await openAppSettings();
+                },
+                child: const Text('Open app settings'),
+              ),
             ],
           ),
         ),
