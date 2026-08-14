@@ -104,7 +104,7 @@ jobs:
               f.write(content)
           PYEOF
 
-      - name: Patch Android permission check
+      - name: Patch robust audio permission flow
         shell: bash
         run: |
           set -euo pipefail
@@ -112,16 +112,42 @@ jobs:
           path = 'lib/main.dart'
           with open(path, encoding='utf-8') as f:
               content = f.read()
+
           if "package:permission_handler/permission_handler.dart" not in content:
               content = content.replace(
                   "import 'package:photo_manager/photo_manager.dart';",
                   "import 'package:photo_manager/photo_manager.dart';\nimport 'package:permission_handler/permission_handler.dart';",
               )
-          old = '''  Future<bool> requestPermission() async {\n    final state = await PhotoManager.requestPermissionExtend();\n    return state.hasAccess;\n  }'''
-          new = '''  Future<bool> requestPermission() async {\n    PermissionStatus status;\n    if (await Permission.audio.isGranted) {\n      return true;\n    }\n    status = await Permission.audio.request();\n    if (status.isGranted) return true;\n    // PhotoManager uses the same Android media permission for scanning.\n    final state = await PhotoManager.requestPermissionExtend();\n    return state.hasAccess || status.isGranted;\n  }'''
-          if old not in content:
-              raise SystemExit('Expected permission function was not found')
-          content = content.replace(old, new)
+
+          start = content.index('  Future<bool> requestPermission() async {')
+          end = content.index('\n  }', start) + len('\n  }')
+          new_function = '''  Future<bool> requestPermission() async {
+    // Check the real Android media permission first. This prevents the app
+    // from asking again when the user already granted audio access in Settings.
+    if (await Permission.audio.isGranted) return true;
+
+    final status = await Permission.audio.request();
+    if (status.isGranted) return true;
+
+    // Fallback for older Android versions where audio maps to storage access.
+    if (await Permission.storage.isGranted) return true;
+    final storageStatus = await Permission.storage.request();
+    return storageStatus.isGranted;
+  }'''
+          content = content[:start] + new_function + content[end:]
+
+          old_view = '''              FilledButton(onPressed: onRefresh, child: const Text('Grant audio access')),'''
+          new_view = '''              FilledButton(onPressed: onRefresh, child: const Text('Grant audio access')),
+              const SizedBox(height: 10),
+              OutlinedButton(
+                onPressed: () async {
+                  await openAppSettings();
+                },
+                child: const Text('Open app settings'),
+              ),'''
+          if old_view in content and 'Open app settings' not in content:
+              content = content.replace(old_view, new_view)
+
           with open(path, 'w', encoding='utf-8') as f:
               f.write(content)
           PYEOF
