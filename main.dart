@@ -4,14 +4,23 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'dart:async';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.vish0420.audio.channel',
-    androidNotificationChannelName: 'Audio playback',
-    androidNotificationOngoing: true,
-  );
   runApp(const AudioOnlyApp());
+  unawaited(_initBackgroundAudio());
+}
+
+Future<void> _initBackgroundAudio() async {
+  try {
+    await JustAudioBackground.init(
+      androidNotificationChannelId: 'com.vish0420.audio.channel',
+      androidNotificationChannelName: 'Audio playback',
+      androidNotificationOngoing: true,
+    );
+  } catch (_) {
+    // Keep the UI usable even if background-audio initialization is not
+    // available on a particular device. Foreground playback can still work.
+  }
 }
 
 enum Season { spring, summer, autumn, winter }
@@ -154,48 +163,40 @@ class _AudioOnlyAppState extends State<AudioOnlyApp> {
   }
 
   Future<void> _startup() async {
-    setState(() => loading = true);
-    final granted = await controller.requestPermission();
-    if (!granted) {
-      if (!mounted) return;
-      setState(() {
-        denied = true;
-        loading = false;
-      });
-      return;
-    }
-    await controller.scan();
     if (!mounted) return;
-    setState(() {
-      denied = false;
-      loading = false;
-    });
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
+    setState(() => loading = true);
+    try {
+      final granted = await controller.requestPermission();
+      if (!granted) {
+        if (!mounted) return;
+        setState(() { denied = true; loading = false; });
+        return;
+      }
+      await controller.scan();
+      if (!mounted) return;
+      setState(() { denied = false; loading = false; });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() { denied = false; loading = false; });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final p = controller.palette;
     return AnimatedBuilder(
       animation: controller,
-      builder: (context, _) {
-        final p = controller.palette;
-        return MaterialApp(
-          debugShowCheckedModeBanner: false,
-          title: 'Audio Player',
-          theme: ThemeData(
-            useMaterial3: true,
-            brightness: Brightness.dark,
-            scaffoldBackgroundColor: p.gradient.last,
-            colorScheme: ColorScheme.fromSeed(seedColor: p.accent, brightness: Brightness.dark),
-          ),
-          home: AudioHomePage(controller: controller, loading: loading, denied: denied, onRefresh: _startup),
-        );
-      },
+      builder: (context, _) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'Audio Player',
+        theme: ThemeData(
+          useMaterial3: true,
+          brightness: Brightness.dark,
+          scaffoldBackgroundColor: p.gradient.last,
+          colorScheme: ColorScheme.fromSeed(seedColor: p.accent, brightness: Brightness.dark),
+        ),
+        home: AudioHomePage(controller: controller, loading: loading, denied: denied, onRefresh: _startup),
+      ),
     );
   }
 }
@@ -279,94 +280,48 @@ class _TrackList extends StatelessWidget {
   const _TrackList({required this.controller});
   @override
   Widget build(BuildContext context) {
+    final p = controller.palette;
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 120),
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
       itemCount: controller.tracks.length,
       separatorBuilder: (_, __) => const SizedBox(height: 6),
       itemBuilder: (context, index) {
         final track = controller.tracks[index];
-        return Card(
-          child: ListTile(
-            leading: CircleAvatar(child: Text('${index + 1}')),
-            title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text(_format(track.duration)),
-            trailing: IconButton(
-              icon: Icon(controller.currentIndex == index && controller.player.playing ? Icons.pause_circle_filled : Icons.play_circle_fill),
-              iconSize: 34,
-              onPressed: () => controller.currentIndex == index ? controller.pauseOrPlay() : controller.playAt(index),
-            ),
-            onTap: () => controller.playAt(index),
-          ),
+        final active = controller.currentIndex == index;
+        return ListTile(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          tileColor: active ? p.accent.withValues(alpha: 0.18) : Colors.black.withValues(alpha: 0.12),
+          leading: CircleAvatar(backgroundColor: p.accent, foregroundColor: Colors.black, child: const Icon(Icons.music_note_rounded)),
+          title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+          subtitle: Text('${track.duration.inMinutes}:${(track.duration.inSeconds % 60).toString().padLeft(2, '0')}'),
+          trailing: active ? IconButton(onPressed: controller.pauseOrPlay, icon: Icon(controller.player.playing ? Icons.pause_rounded : Icons.play_arrow_rounded)) : const Icon(Icons.play_arrow_rounded),
+          onTap: () => controller.playAt(index),
         );
       },
     );
-  }
-
-  static String _format(Duration d) {
-    final h = d.inHours;
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
 }
 
 class _MiniPlayer extends StatelessWidget {
   final AudioController controller;
   const _MiniPlayer({required this.controller});
-
   @override
   Widget build(BuildContext context) {
     final current = controller.current;
     if (current == null) return const SizedBox.shrink();
-    return SafeArea(
-      top: false,
-      child: Material(
-        elevation: 8,
-        color: Colors.black.withOpacity(0.25),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            StreamBuilder<Duration>(
-              stream: controller.player.positionStream,
-              builder: (_, snapshot) {
-                final position = snapshot.data ?? Duration.zero;
-                final max = (controller.player.duration ?? current.duration).inMilliseconds.toDouble();
-                final value = position.inMilliseconds.clamp(0, max.toInt()).toDouble();
-                return Slider(
-                  value: max <= 0 ? 0 : value,
-                  min: 0,
-                  max: max <= 0 ? 1 : max,
-                  onChanged: (v) => controller.player.seek(Duration(milliseconds: v.round())),
-                );
-              },
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-              child: Row(
-                children: [
-                  Expanded(child: Text(current.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600))),
-                  IconButton(onPressed: controller.previous, icon: const Icon(Icons.skip_previous_rounded)),
-                  StreamBuilder<bool>(
-                    stream: controller.player.playingStream,
-                    builder: (_, snapshot) => IconButton(onPressed: controller.pauseOrPlay, icon: Icon((snapshot.data ?? false) ? Icons.pause_circle_filled : Icons.play_circle_fill), iconSize: 38),
-                  ),
-                  IconButton(onPressed: controller.next, icon: const Icon(Icons.skip_next_rounded)),
-                  PopupMenuButton<int>(
-                    icon: const Icon(Icons.bedtime_outlined),
-                    onSelected: (minutes) => controller.setSleep(Duration(minutes: minutes)),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 15, child: Text('Sleep 15 min')),
-                      PopupMenuItem(value: 30, child: Text('Sleep 30 min')),
-                      PopupMenuItem(value: 45, child: Text('Sleep 45 min')),
-                      PopupMenuItem(value: 60, child: Text('Sleep 60 min')),
-                      PopupMenuItem(value: 90, child: Text('Sleep 90 min')),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+    return Container(
+      margin: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.36), borderRadius: BorderRadius.circular(20)),
+      child: Row(
+        children: [
+          const Icon(Icons.album_rounded),
+          const SizedBox(width: 10),
+          Expanded(child: Text(current.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+          IconButton(onPressed: controller.previous, icon: const Icon(Icons.skip_previous_rounded)),
+          IconButton(onPressed: controller.pauseOrPlay, icon: Icon(controller.player.playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_fill_rounded)),
+          IconButton(onPressed: controller.next, icon: const Icon(Icons.skip_next_rounded)),
+        ],
       ),
     );
   }
