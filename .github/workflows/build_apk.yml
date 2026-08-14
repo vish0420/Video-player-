@@ -104,54 +104,6 @@ jobs:
               f.write(content)
           PYEOF
 
-      - name: Patch robust audio permission flow
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PYEOF'
-          path = 'lib/main.dart'
-          with open(path, encoding='utf-8') as f:
-              content = f.read()
-
-          if "package:permission_handler/permission_handler.dart" not in content:
-              content = content.replace(
-                  "import 'package:photo_manager/photo_manager.dart';",
-                  "import 'package:photo_manager/photo_manager.dart';\nimport 'package:permission_handler/permission_handler.dart';",
-              )
-
-          start = content.index('  Future<bool> requestPermission() async {')
-          end = content.index('\n  }', start) + len('\n  }')
-          new_function = '''  Future<bool> requestPermission() async {
-    // Check the real Android media permission first. This prevents the app
-    // from asking again when the user already granted audio access in Settings.
-    if (await Permission.audio.isGranted) return true;
-
-    final status = await Permission.audio.request();
-    if (status.isGranted) return true;
-
-    // Fallback for older Android versions where audio maps to storage access.
-    if (await Permission.storage.isGranted) return true;
-    final storageStatus = await Permission.storage.request();
-    return storageStatus.isGranted;
-  }'''
-          content = content[:start] + new_function + content[end:]
-
-          old_view = '''              FilledButton(onPressed: onRefresh, child: const Text('Grant audio access')),'''
-          new_view = '''              FilledButton(onPressed: onRefresh, child: const Text('Grant audio access')),
-              const SizedBox(height: 10),
-              OutlinedButton(
-                onPressed: () async {
-                  await openAppSettings();
-                },
-                child: const Text('Open app settings'),
-              ),'''
-          if old_view in content and 'Open app settings' not in content:
-              content = content.replace(old_view, new_view)
-
-          with open(path, 'w', encoding='utf-8') as f:
-              f.write(content)
-          PYEOF
-
       - name: Get dependencies
         run: flutter pub get
 
