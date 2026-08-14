@@ -1,15 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:just_audio/just_audio.dart';
 
 import 'audio_item.dart';
-import 'playback_service.dart';
 
 class AudioPlayerScreen extends StatefulWidget {
   final AudioItem audio;
   final List<AudioItem> playlist;
-
   const AudioPlayerScreen({super.key, required this.audio, required this.playlist});
 
   @override
@@ -17,74 +15,96 @@ class AudioPlayerScreen extends StatefulWidget {
 }
 
 class _AudioPlayerScreenState extends State<AudioPlayerScreen> {
-  late final Player _player;
-  final PlaybackService _playback = PlaybackService();
-  int _index = 0;
-  String? _path;
-  bool _repeat = false;
+  late final AudioPlayer _player;
+  late int _index;
+  Timer? _sleepTimer;
+  Duration? _sleepRemaining;
   bool _shuffle = false;
-  StreamSubscription<Duration>? _positionSub;
+  bool _repeat = false;
 
   AudioItem get current => widget.playlist[_index];
 
   @override
   void initState() {
     super.initState();
-    _player = Player();
-    final found = widget.playlist.indexWhere((a) => a.asset.id == widget.audio.asset.id);
-    _index = found >= 0 ? found : 0;
-    _open(resume: true);
-    _positionSub = _player.stream.position.listen((pos) {
-      if (_path != null && pos.inSeconds % 5 == 0) {
-        _playback.saveLastPlayed(_path!, pos);
-      }
+    _player = AudioPlayer();
+    _index = widget.playlist.indexWhere((a) => a.asset.id == widget.audio.asset.id);
+    if (_index < 0) _index = 0;
+    _openCurrent();
+    _player.playerStateStream.listen((state) {
+      if (state.processingState == ProcessingState.completed && mounted) _next();
     });
   }
 
-  Future<void> _open({bool resume = false}) async {
+  Future<void> _openCurrent() async {
     final path = await current.resolvePath();
-    if (!mounted || path == null) return;
-    _path = path;
-    await _player.open(Media(path));
-    if (resume) {
-      final saved = await _playback.getPosition(path);
-      if (saved > Duration.zero) await _player.seek(saved);
+    if (path == null || !mounted) return;
+    try {
+      await _player.setFilePath(path);
+      await _player.play();
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('This audio file could not be decoded on this device.')));
     }
-    await _player.play();
   }
 
-  void _next() {
+  Future<void> _next() async {
     if (widget.playlist.isEmpty) return;
-    if (_shuffle) {
-      _index = (_index + 2) % widget.playlist.length;
+    if (_shuffle && widget.playlist.length > 1) {
+      _index = (_index + 1 + DateTime.now().millisecondsSinceEpoch % (widget.playlist.length - 1)) % widget.playlist.length;
     } else if (_index < widget.playlist.length - 1) {
       _index++;
     } else if (_repeat) {
       _index = 0;
     } else {
+      await _player.pause();
       return;
     }
     setState(() {});
-    _open();
+    await _openCurrent();
   }
 
-  void _previous() {
-    if (_player.state.position.inSeconds > 3) {
-      _player.seek(Duration.zero);
+  Future<void> _previous() async {
+    if (_player.position > const Duration(seconds: 3)) {
+      await _player.seek(Duration.zero);
       return;
     }
     if (_index > 0) {
       setState(() => _index--);
-      _open();
+      await _openCurrent();
     }
   }
 
-  void _seek(Duration amount) {
-    final target = _player.state.position + amount;
-    _player.seek(target < Duration.zero ? Duration.zero : target);
+  void _sleep(Duration duration) {
+    _sleepTimer?.cancel();
+    if (duration == Duration.zero) {
+      setState(() { _sleepRemaining = null; });
+      return;
+    }
+    setState(() => _sleepRemaining = duration);
+    _sleepTimer = Timer(duration, () async { await _player.pause(); if (mounted) setState(() => _sleepRemaining = null); });
   }
 
-  String _time(Duration d) {
+  Future<void> _showSleepTimer() async {
+    final choice = await showModalBottomSheet<Duration>(
+      context: context,
+      builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        const ListTile(title: Text('Sleep timer'), subtitle: Text('Stop playback automatically')),
+        for (final m in [15, 30, 45, 60, 90]) ListTile(leading: const Icon(Icons.bedtime_outlined), title: Text('$m minutes'), onTap: () => Navigator.pop(context, Duration(minutes: m))),
+        ListTile(leading: const Icon(Icons.timer_off_outlined), title: const Text('Off'), onTap: () => Navigator.pop(context, Duration.zero)),
+        const SizedBox(height: 8),
+      ]),),
+    );
+    if (choice != null) _sleep(choice);
+  }
+
+  @override
+  void dispose() {
+    _sleepTimer?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
+
+  String _fmt(Duration d) {
     final h = d.inHours;
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
@@ -92,87 +112,50 @@ class _AudioPlayerScreenState extends State<AudioPlayerScreen> {
   }
 
   @override
-  void dispose() {
-    _positionSub?.cancel();
-    if (_path != null) _playback.saveLastPlayed(_path!, _player.state.position);
-    _player.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Audio Player'),
-        actions: [
-          IconButton(icon: Icon(_shuffle ? Icons.shuffle_on : Icons.shuffle), onPressed: () => setState(() => _shuffle = !_shuffle)),
-          IconButton(icon: Icon(_repeat ? Icons.repeat_on : Icons.repeat), onPressed: () => setState(() => _repeat = !_repeat)),
-        ],
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            children: [
-              const Spacer(),
-              Container(
-                width: 250,
-                height: 250,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(28),
-                  gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF182848), Color(0xFF4B6CB7)]),
-                  boxShadow: const [BoxShadow(blurRadius: 30, spreadRadius: 2)],
-                ),
-                child: const Icon(Icons.music_note_rounded, size: 110, color: Colors.white),
-              ),
-              const SizedBox(height: 28),
-              Text(current.title, maxLines: 2, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 6),
-              Text('${current.artist} • ${current.album}', style: Theme.of(context).textTheme.bodyMedium),
-              const SizedBox(height: 24),
-              StreamBuilder<Duration>(
-                stream: _player.stream.duration,
-                initialData: _player.state.duration,
-                builder: (context, d) => StreamBuilder<Duration>(
-                  stream: _player.stream.position,
-                  initialData: _player.state.position,
-                  builder: (context, p) {
-                    final duration = d.data ?? Duration.zero;
-                    final position = p.data ?? Duration.zero;
-                    final max = duration.inMilliseconds > 0 ? duration.inMilliseconds.toDouble() : 1.0;
-                    final value = position.inMilliseconds.clamp(0, max.toInt()).toDouble();
-                    return Column(children: [
-                      Slider(value: value, min: 0, max: max, onChanged: (v) => _player.seek(Duration(milliseconds: v.toInt()))),
-                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(_time(position)), Text(_time(duration))]),
-                    ]);
-                  },
-                ),
-              ),
-              const SizedBox(height: 12),
-              StreamBuilder<bool>(
-                stream: _player.stream.playing,
-                initialData: _player.state.playing,
-                builder: (context, snapshot) {
-                  final playing = snapshot.data ?? false;
-                  return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    IconButton(iconSize: 32, onPressed: _previous, icon: const Icon(Icons.skip_previous_rounded)),
-                    IconButton(iconSize: 34, onPressed: () => _seek(const Duration(seconds: -10)), icon: const Icon(Icons.replay_10_rounded)),
-                    const SizedBox(width: 8),
-                    IconButton(iconSize: 72, onPressed: () => playing ? _player.pause() : _player.play(), icon: Icon(playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded)),
-                    const SizedBox(width: 8),
-                    IconButton(iconSize: 34, onPressed: () => _seek(const Duration(seconds: 10)), icon: const Icon(Icons.forward_10_rounded)),
-                    IconButton(iconSize: 32, onPressed: _next, icon: const Icon(Icons.skip_next_rounded)),
-                  ]);
-                },
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(onPressed: () => _player.setRate(_player.state.rate == 1.0 ? 1.5 : 1.0), icon: const Icon(Icons.speed), label: const Text('Playback speed')),
-              const Spacer(),
-              const Text('Audio output uses your phone\'s native audio path. If Dolby is enabled at the system/device level, compatible processing is retained.'),
-            ],
-          ),
-        ),
+      appBar: AppBar(title: const Text('Audio Player'), actions: [
+        IconButton(tooltip: 'Playlist', icon: const Icon(Icons.queue_music_rounded), onPressed: () => showModalBottomSheet(context: context, builder: (_) => _PlaylistSheet(items: widget.playlist, selected: _index, onSelect: (i) { Navigator.pop(context); setState(() => _index = i); _openCurrent(); }))),
+        IconButton(tooltip: 'Sleep timer', icon: const Icon(Icons.bedtime_outlined), onPressed: _showSleepTimer),
+      ]),
+      body: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragEnd: (d) { if ((d.primaryVelocity ?? 0) < -250) _next(); else if ((d.primaryVelocity ?? 0) > 250) _previous(); },
+        child: SafeArea(child: Padding(padding: const EdgeInsets.all(24), child: Column(children: [
+          const Spacer(),
+          Container(width: 250, height: 250, decoration: BoxDecoration(borderRadius: BorderRadius.circular(28), gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF182848), Color(0xFF4B6CB7)])), child: const Icon(Icons.music_note_rounded, size: 110, color: Colors.white)),
+          const SizedBox(height: 28),
+          Text(current.title, maxLines: 2, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          Text(current.artist, style: Theme.of(context).textTheme.bodyMedium),
+          const SizedBox(height: 20),
+          StreamBuilder<Duration>(stream: _player.positionStream, builder: (_, p) => StreamBuilder<Duration?>(stream: _player.durationStream, builder: (_, d) {
+            final pos = p.data ?? Duration.zero; final dur = d.data ?? current.duration; final max = dur.inMilliseconds > 0 ? dur.inMilliseconds.toDouble() : 1.0; final value = pos.inMilliseconds.clamp(0, max.toInt()).toDouble();
+            return Column(children: [Slider(value: value, min: 0, max: max, onChanged: (v) => _player.seek(Duration(milliseconds: v.toInt()))), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(_fmt(pos)), Text(_fmt(dur))])]);
+          })),
+          const SizedBox(height: 12),
+          StreamBuilder<PlayerState>(stream: _player.playerStateStream, builder: (_, s) { final playing = s.data?.playing ?? false; return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            IconButton(iconSize: 34, onPressed: _previous, icon: const Icon(Icons.skip_previous_rounded)),
+            IconButton(iconSize: 34, onPressed: () => _player.seek(_player.position - const Duration(seconds: 10)), icon: const Icon(Icons.replay_10_rounded)),
+            IconButton(iconSize: 72, onPressed: () => playing ? _player.pause() : _player.play(), icon: Icon(playing ? Icons.pause_circle_filled_rounded : Icons.play_circle_filled_rounded)),
+            IconButton(iconSize: 34, onPressed: () => _player.seek(_player.position + const Duration(seconds: 10)), icon: const Icon(Icons.forward_10_rounded)),
+            IconButton(iconSize: 34, onPressed: _next, icon: const Icon(Icons.skip_next_rounded)),
+          ]); }),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            IconButton(tooltip: 'Shuffle', icon: Icon(_shuffle ? Icons.shuffle_on_rounded : Icons.shuffle_rounded), onPressed: () => setState(() => _shuffle = !_shuffle)),
+            IconButton(tooltip: 'Repeat', icon: Icon(_repeat ? Icons.repeat_on_rounded : Icons.repeat_rounded), onPressed: () => setState(() => _repeat = !_repeat)),
+            if (_sleepRemaining != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Text('Sleep ${_fmt(_sleepRemaining!)}')),
+          ]),
+          const Spacer(),
+          const Text('Swipe left/right to change tracks', style: TextStyle(fontSize: 13)),
+        ]))),
       ),
     );
   }
+}
+
+class _PlaylistSheet extends StatelessWidget {
+  final List<AudioItem> items; final int selected; final ValueChanged<int> onSelect;
+  const _PlaylistSheet({required this.items, required this.selected, required this.onSelect});
+  @override Widget build(BuildContext context) => SafeArea(child: ListView.builder(padding: const EdgeInsets.symmetric(vertical: 12), itemCount: items.length, itemBuilder: (_, i) => ListTile(selected: i == selected, leading: Icon(i == selected ? Icons.graphic_eq : Icons.music_note_outlined), title: Text(items[i].title, maxLines: 1, overflow: TextOverflow.ellipsis), subtitle: Text(items[i].artist), onTap: () => onSelect(i))));
 }
